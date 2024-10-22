@@ -3,6 +3,7 @@ import cv2
 import matplotlib.pyplot as plt
 from numpy.linalg import inv, svd
 
+# [Previous functions remain the same: compute_homography, compute_homography_ransac]
 def compute_homography(src_pts, dst_pts):
     """
     Compute homography matrix H from corresponding points
@@ -74,15 +75,62 @@ def compute_homography_ransac(src_pts, dst_pts, threshold=4.0, max_iterations=20
     
     return best_H, best_inliers_mask
 
-def compute_and_show_sift_homography(img1_path, img5_path):
+def stitch_images(img1, img5, H):
     """
-    Compute SIFT features, match them, compute homography, and show visualizations
+    Stitch img1 onto img5 using homography matrix H
+    """
+    # Get dimensions
+    h1, w1 = img1.shape[:2]
+    h5, w5 = img5.shape[:2]
+    
+    # Create points for corners of img1
+    corners = np.float32([[0, 0], [0, h1], [w1, h1], [w1, 0]]).reshape(-1, 1, 2)
+    
+    # Transform corners
+    transformed_corners = cv2.perspectiveTransform(corners, H)
+    
+    # Get bounds of the new stitched image
+    min_x = int(min(np.min(transformed_corners[:, :, 0]), 0))
+    max_x = int(max(np.max(transformed_corners[:, :, 0]), w5))
+    min_y = int(min(np.min(transformed_corners[:, :, 1]), 0))
+    max_y = int(max(np.max(transformed_corners[:, :, 1]), h5))
+    
+    # Translation matrix to shift to positive coordinates
+    translation = np.array([
+        [1, 0, -min_x],
+        [0, 1, -min_y],
+        [0, 0, 1]
+    ])
+    
+    # Combine transformation matrices
+    H_final = translation.dot(H)
+    
+    # Create output image with the size of the new bounds
+    output_shape = (max_y - min_y, max_x - min_x)
+    output = cv2.warpPerspective(img1, H_final, output_shape)
+    
+    # Copy img5 into output
+    y_offset = -min_y
+    x_offset = -min_x
+    
+    # Ensure the sizes match before copying img5 into the output image
+    y_end = min(y_offset + h5, output.shape[0])
+    x_end = min(x_offset + w5, output.shape[1])
+    
+    # Copy img5 to the corresponding region in output, resizing if needed
+    output[y_offset:y_end, x_offset:x_end] = img5[:y_end - y_offset, :x_end - x_offset]
+    
+    return output
+
+def complete_stitching_pipeline(img1_path, img5_path, ground_truth_H=None):
+    """
+    Complete pipeline for image stitching with visualizations
     """
     # Read images
     img1 = cv2.imread(img1_path)
     img5 = cv2.imread(img5_path)
     
-    # Convert to grayscale
+    # Convert to grayscale for SIFT
     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
     gray5 = cv2.cvtColor(img5, cv2.COLOR_BGR2GRAY)
     
@@ -113,67 +161,90 @@ def compute_and_show_sift_homography(img1_path, img5_path):
     
     # Compute homography using RANSAC
     H, inliers_mask = compute_homography_ransac(src_pts, dst_pts)
+# 
+
+    # Create visualization figure
+    plt.figure(figsize=(20, 15))
     
-    # Create visualization
-    plt.figure(figsize=(20, 10))
-    
-    # Draw matches with inliers/outliers in different colors
+    # 1. Draw matches with inliers/outliers
     inlier_matches = [good_matches[i] for i in range(len(good_matches)) if inliers_mask[i]]
     outlier_matches = [good_matches[i] for i in range(len(good_matches)) if not inliers_mask[i]]
     
-    # Draw inliers in green
     img_matches = cv2.drawMatches(img1, kp1, img5, kp2, inlier_matches, None,
                                 matchColor=(0, 255, 0),
                                 flags=cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS)
-    
-    # Draw outliers in red
     img_matches = cv2.drawMatches(img1, kp1, img5, kp2, outlier_matches, img_matches,
                                 matchColor=(0, 0, 255),
                                 flags=cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS)
     
-    # Display matches
-    plt.subplot(2, 1, 1)
+    plt.subplot(3, 1, 1)
     plt.imshow(cv2.cvtColor(img_matches, cv2.COLOR_BGR2RGB))
-    plt.title(f'Matches: Green=Inliers ({sum(inliers_mask)}), Red=Outliers ({len(good_matches)-sum(inliers_mask)})')
+    plt.title('SIFT Matches (Green=Inliers, Red=Outliers)')
     plt.axis('off')
     
-    # Apply homography to show transformation
+    # 2. Show transformed boundaries
     h1, w1 = img1.shape[:2]
     corners = np.float32([[0, 0], [0, h1], [w1, h1], [w1, 0]]).reshape(-1, 1, 2)
+
+    if ground_truth_H is not None:
+        H = ground_truth_H
     transformed_corners = cv2.perspectiveTransform(corners, H)
     
-    # Draw transformed boundaries
     img_transformed = img5.copy()
     cv2.polylines(img_transformed, [np.int32(transformed_corners)], True, (0, 255, 0), 3)
     
-    # Display transformed image
-    plt.subplot(2, 1, 2)
+    plt.subplot(3, 1, 2)
     plt.imshow(cv2.cvtColor(img_transformed, cv2.COLOR_BGR2RGB))
-    plt.title('Transformed Image Boundaries')
+    plt.title('Projected Boundaries of img1 on img5')
     plt.axis('off')
     
-    # Save and show visualization
-    plt.tight_layout()
-    plt.savefig('homography_visualization.png', dpi=300, bbox_inches='tight')
+    # 3. Perform stitching
+    result = stitch_images(img1, img5, H)
     
-    # Print statistics and homography matrix
+    plt.subplot(3, 1, 3)
+    plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+    plt.title('Final Stitched Result')
+    plt.axis('off')
+    
+    # Save visualizations
+    plt.tight_layout()
+    plt.savefig('complete_stitching_process.png', dpi=300, bbox_inches='tight')
+    
+    # Save stitched result separately
+    cv2.imwrite('stitched_result.jpg', result)
+    
+    # Print statistics
     print(f"Total matches: {len(good_matches)}")
     print(f"Inliers: {sum(inliers_mask)}")
     print(f"Outliers: {len(good_matches)-sum(inliers_mask)}")
     print("\nComputed Homography Matrix:")
     print(H)
     
-    return H, inliers_mask
+    return result, H
 
 if __name__ == "__main__":
     # Specify image paths
     img1_path = "graf/img1.ppm"
     img5_path = "graf/img5.ppm"
+
+    # Load the homography matrix from the file
+    file_path = "graf/H1to5p"
+
+    # Read the contents of the file
+    with open(file_path, 'r') as f:
+        data = f.read()
+
+    # Convert the string data into a NumPy array
+    # Split the string by lines and spaces, and then reshape it into a 3x3 array
+    ground_truth_H = np.array([float(x) for x in data.split()]).reshape(3, 3)
+
+    print(ground_truth_H)
     
     try:
-        # Compute and visualize SIFT features and homography
-        H, inliers_mask = compute_and_show_sift_homography(img1_path, img5_path)
-        print("\nVisualization saved as 'homography_visualization.png'")
+        # Run complete pipeline
+        result, H = complete_stitching_pipeline(img1_path, img5_path, ground_truth_H=ground_truth_H)
+        print("\nVisualization saved as 'complete_stitching_process.png'")
+        print("Stitched result saved as 'stitched_result.jpg'")
         plt.show()
         
     except Exception as e:
